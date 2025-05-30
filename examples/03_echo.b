@@ -1,11 +1,9 @@
 main(argc, argv) {
     extrn printf;
 
-    auto W;
-    W = 8;
+    auto W 8;
 
-    auto first;
-    first = 1;
+    auto first 1;
     argv += W;
     argc -= 1;
     while (argc) {

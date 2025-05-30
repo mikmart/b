@@ -14,8 +14,7 @@ main() {
           SetTargetFPS, GetScreenWidth, GetScreenHeight,
           IsKeyPressed;
 
-    auto word;
-    word = 8;
+    auto word 8;
 
     auto c, cs, cn;
     c              = 0;               // Current color
@@ -33,8 +32,7 @@ main() {
     x  = y  = 200;
     dx = dy = 5;
 
-    auto paused;
-    paused = 0;
+    auto paused 0;
 
     InitWindow(800, 600, "Hello, from B");
     SetTargetFPS(60);

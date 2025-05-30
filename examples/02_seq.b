@@ -6,8 +6,7 @@
 main(argc, argv) {
     extrn printf, fprintf, stderr, atoi;
 
-    auto W;
-    W = 8;
+    auto W 8;
 
     if (argc <= 1) {
         fprintf(stderr, "%s: missing operand\n", *argv);

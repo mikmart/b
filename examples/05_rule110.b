@@ -44,8 +44,7 @@ main() {
     *(base + (n - 2)*word) = 1;
 
     display(base, n);
-    auto i;
-    i = 0;
+    auto i 0;
     while (i < n - 3) {
         next(base, n);
         display(base, n);
