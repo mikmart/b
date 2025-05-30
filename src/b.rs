@@ -430,7 +430,6 @@ pub unsafe fn compile_primary_expression(l: *mut stb_lexer, input_path: *const c
             compile_binop(arg, Arg::Literal(1), Binop::Minus, loc, c);
             Some((arg, false))
         }
-        CLEX_charlit | CLEX_intlit => Some((Arg::Literal((*l).int_number), false)),
         CLEX_id => {
             let name = arena::strdup(&mut (*c).arena, (*l).string);
             let name_loc = lexer_loc(l, input_path);
@@ -454,19 +453,7 @@ pub unsafe fn compile_primary_expression(l: *mut stb_lexer, input_path: *const c
                 }
             }
         }
-        CLEX_dqstring => {
-            let offset = (*c).data.count;
-            let string_len = strlen((*l).string);
-            da_append_many(&mut (*c).data, slice::from_raw_parts((*l).string as *const u8, string_len));
-            // TODO: Strings in B are not NULL-terminated.
-            // They are terminated with symbol '*e' ('*' is escape character akin to '\' in C) which according to the
-            // spec is called just "end-of-file" without any elaboration on what its value is. Maybe it had a specific
-            // value on PDP that was a common knowledge at the time? In any case that breaks compatibility with
-            // libc. While the language is still in development we gonna terminate it with 0. We will make it
-            // "spec complaint" later.
-            da_append(&mut (*c).data, 0); // NULL-terminator
-            Some((Arg::DataOffset(offset), false))
-        }
+        CLEX_intlit | CLEX_charlit | CLEX_dqstring => compile_constant(l, input_path, c),
         _ => {
             diagf!(lexer_loc(l, input_path), c!("Expected start of a primary expression by got %s\n"), display_token_kind_temp((*l).token));
             None
@@ -513,6 +500,30 @@ pub unsafe fn compile_primary_expression(l: *mut stb_lexer, input_path: *const c
     } else {
         (*l).parse_point = saved_point;
         Some((arg, is_lvalue))
+    }
+}
+
+// TODO: communicate to the caller that this does NOT consume a token
+pub unsafe fn compile_constant(l: *mut stb_lexer, input_path: *const c_char, c: *mut Compiler) -> Option<(Arg, bool)> {
+    match (*l).token {
+        CLEX_charlit | CLEX_intlit => Some((Arg::Literal((*l).int_number), false)),
+        CLEX_dqstring => {
+            let offset = (*c).data.count;
+            let string_len = strlen((*l).string);
+            da_append_many(&mut (*c).data, slice::from_raw_parts((*l).string as *const u8, string_len));
+            // TODO: Strings in B are not NULL-terminated.
+            // They are terminated with symbol '*e' ('*' is escape character akin to '\' in C) which according to the
+            // spec is called just "end-of-file" without any elaboration on what its value is. Maybe it had a specific
+            // value on PDP that was a common knowledge at the time? In any case that breaks compatibility with
+            // libc. While the language is still in development we gonna terminate it with 0. We will make it
+            // "spec complaint" later.
+            da_append(&mut (*c).data, 0); // NULL-terminator
+            Some((Arg::DataOffset(offset), false))
+        }
+        _ => {
+            diagf!(lexer_loc(l, input_path), c!("Expected constant but got %s\n"), display_token_kind_temp((*l).token));
+            None
+        }
     }
 }
 
@@ -724,14 +735,22 @@ pub unsafe fn compile_statement(l: *mut stb_lexer, input_path: *const c_char, c:
                 get_and_expect_clex(l, input_path, CLEX_id)?;
                 let name = arena::strdup(&mut (*c).arena, (*l).string);
                 let loc = lexer_loc(l, input_path);
-                let storage = if extrn {
+                if extrn {
                     name_declare_if_not_exists(&mut (*c).extrns, name);
-                    Storage::External{name}
+                    declare_var(l, input_path, &mut (*c).vars, name, loc, Storage::External{name})?;
                 } else {
                     let index = allocate_auto_var(&mut (*c).auto_vars_ator);
-                    Storage::Auto{index}
+                    declare_var(l, input_path, &mut (*c).vars, name, loc, Storage::Auto{index})?;
+                    let saved_point = (*l).parse_point;
+                    stb_c_lexer_get_token(l);
+                    expect_clexes(l, input_path, &[CLEX_intlit, CLEX_charlit, CLEX_dqstring, ',' as c_long, ';' as c_long])?;
+                    if (*l).token == CLEX_intlit || (*l).token == CLEX_charlit || (*l).token == CLEX_dqstring {
+                        let (arg, _) = compile_constant(l, input_path, c)?;
+                        push_opcode(Op::AutoAssign {index, arg}, lexer_loc(l, input_path), c);
+                    } else {
+                        (*l).parse_point = saved_point;
+                    }
                 };
-                declare_var(l, input_path, &mut (*c).vars, name, loc, storage)?;
                 stb_c_lexer_get_token(l);
                 expect_clexes(l, input_path, &[',' as c_long, ';' as c_long])?;
                 if (*l).token == ';' as c_long {
