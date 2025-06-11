@@ -1,6 +1,6 @@
 use core::ffi::*;
 use core::cmp;
-use crate::{Op, Binop, OpWithLocation, Arg, Func, Global, ImmediateValue, Compiler, align_bytes};
+use crate::{Op, Binop, OpWithLocation, Arg, Func, Global, AsmBlock, ImmediateValue, Compiler, align_bytes};
 use crate::nob::*;
 use crate::crust::libc::*;
 use crate::codegen::Os;
@@ -270,7 +270,6 @@ pub unsafe fn generate_function(name: *const c_char, params_count: usize, auto_v
 }
 
 pub unsafe fn generate_funcs(output: *mut String_Builder, funcs: *const [Func], os: Os) {
-    sb_appendf(output, c!("section \".text\" executable\n"));
     for i in 0..funcs.len() {
         generate_function((*funcs)[i].name, (*funcs)[i].params_count, (*funcs)[i].auto_vars_count, da_slice((*funcs)[i].body), output, os);
     }
@@ -295,6 +294,17 @@ pub unsafe fn generate_extrns(output: *mut String_Builder, extrns: *const [*cons
         }
 
         sb_appendf(output, c!("extrn '%s' as _%s\n"), name, name);
+    }
+}
+
+pub unsafe fn generate_asm_blocks(output: *mut String_Builder, blocks: *const [AsmBlock]) {
+    for i in 0..blocks.len() {
+        let block = (*blocks)[i];
+        sb_appendf(output, c!("public _%s as '%s'\n"), block.name, block.name);
+        sb_appendf(output, c!("_%s:\n"), block.name);
+        for j in 0..block.body.count {
+            sb_appendf(output, c!("    %s\n"), *block.body.items.add(j));
+        }
     }
 }
 
@@ -348,9 +358,12 @@ pub unsafe fn generate_program(output: *mut String_Builder, c: *const Compiler, 
         Os::Linux   => sb_appendf(output, c!("format ELF64\n")),
         Os::Windows => sb_appendf(output, c!("format MS64 COFF\n")),
     };
+    sb_appendf(output, c!("section \".text\" executable\n"));
     generate_funcs(output, da_slice((*c).funcs), os);
+    generate_asm_blocks(output, da_slice((*c).asm_funcs));
     generate_extrns(output, da_slice((*c).extrns), da_slice((*c).funcs), da_slice((*c).globals));
     sb_appendf(output, c!("section \".data\"\n"));
     generate_data_section(output, da_slice((*c).data));
     generate_globals(output, da_slice((*c).globals));
+    generate_asm_blocks(output, da_slice((*c).asm_globals));
 }

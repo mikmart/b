@@ -905,6 +905,23 @@ pub unsafe fn compile_statement(l: *mut Lexer, c: *mut Compiler) -> Option<()> {
     }
 }
 
+pub unsafe fn compile_asm_block_body(l: *mut Lexer, c: *mut Compiler) -> Option<()> {
+    get_and_expect_tokens(l, &[Token::String, Token::OCurly])?;
+    match (*l).token {
+        // TODO: Allocate assembly contents in a suitable arena.
+        Token::String => da_append(&mut (*c).asm_block_body, strdup((*l).string)),
+        Token::OCurly => {
+            loop {
+                get_and_expect_tokens(l, &[Token::String, Token::CCurly])?;
+                if (*l).token == Token::CCurly { return Some(()); }
+                da_append(&mut (*c).asm_block_body, strdup((*l).string));
+            }
+        },
+        _ => unreachable!(),
+    }
+    Some(())
+}
+
 pub unsafe fn temp_strip_suffix(s: *const c_char, suffix: *const c_char) -> Option<*const c_char> {
     let mut sv = sv_from_cstr(s);
     let suffix_len = strlen(suffix);
@@ -929,6 +946,12 @@ pub struct Func {
     body: Array<OpWithLocation>,
     params_count: usize,
     auto_vars_count: usize,
+}
+
+#[derive(Clone, Copy)]
+pub struct AsmBlock {
+    name: *const c_char,
+    body: Array<*const c_char>,
 }
 
 #[derive(Clone, Copy)]
@@ -962,6 +985,9 @@ pub struct Compiler {
     pub func_labels: Array<Label>,
     pub func_labels_used: Array<Label>,
     pub switch_stack: Array<Switch>,
+    pub asm_funcs: Array<AsmBlock>,
+    pub asm_globals: Array<AsmBlock>,
+    pub asm_block_body: Array<*const c_char>,
     pub data: Array<u8>,
     pub extrns: Array<*const c_char>,
     pub globals: Array<Global>,
@@ -986,7 +1012,9 @@ pub unsafe fn compile_program(l: *mut Lexer, c: *mut Compiler) -> Option<()> {
         lexer::get_token(l)?;
         if (*l).token == Token::EOF { break 'def }
 
-        expect_token(l, Token::ID)?;
+        expect_tokens(l, &[Token::ID, Token::Asm])?;
+        let asm = (*l).token == Token::Asm;
+        if asm { get_and_expect_token(l, Token::ID)?; }
 
         let name = arena::strdup(&mut (*c).arena_names, (*l).string);
         let name_loc = (*l).loc;
@@ -1017,88 +1045,100 @@ pub unsafe fn compile_program(l: *mut Lexer, c: *mut Compiler) -> Option<()> {
                     }
                 }
             }
-            compile_statement(l, c)?;
-            scope_pop(&mut (*c).vars); // end function scope
+            if asm {
+                compile_asm_block_body(l, c)?;
+                let body = (*c).asm_block_body;
+                da_append(&mut (*c).asm_funcs, AsmBlock {name, body});
+                (*c).asm_block_body = zeroed();
+            } else {
+                compile_statement(l, c)?;
 
-            for i in 0..(*c).func_labels_used.count {
-                let used_label = *(*c).func_labels_used.items.add(i);
-                let existing_label = find_label(&(*c).func_labels, used_label.name);
-                if existing_label.is_null() {
-                    diagf!(used_label.loc, c!("ERROR: label `%s` used but not defined\n"), used_label.name);
-                    bump_error_count(c)?;
-                    continue;
+                for i in 0..(*c).func_labels_used.count {
+                    let used_label = *(*c).func_labels_used.items.add(i);
+                    let existing_label = find_label(&(*c).func_labels, used_label.name);
+                    if existing_label.is_null() {
+                        diagf!(used_label.loc, c!("ERROR: label `%s` used but not defined\n"), used_label.name);
+                        bump_error_count(c)?;
+                        continue;
+                    }
+                    (*(*c).func_body.items.add(used_label.addr)).opcode = Op::Jmp {addr: (*existing_label).addr};
                 }
-                (*(*c).func_body.items.add(used_label.addr)).opcode = Op::Jmp {addr: (*existing_label).addr};
-            }
-            arena::reset(&mut (*c).arena_labels);
+                arena::reset(&mut (*c).arena_labels);
 
-            da_append(&mut (*c).funcs, Func {
-                name,
-                name_loc,
-                body: (*c).func_body,
-                params_count,
-                auto_vars_count: (*c).auto_vars_ator.max,
-            });
-            (*c).func_body = zeroed();
-            (*c).func_labels.count = 0;
-            (*c).func_labels_used.count = 0;
+                da_append(&mut (*c).funcs, Func {
+                    name,
+                    name_loc,
+                    body: (*c).func_body,
+                    params_count,
+                    auto_vars_count: (*c).auto_vars_ator.max,
+                });
+                (*c).func_body = zeroed();
+                (*c).func_labels.count = 0;
+                (*c).func_labels_used.count = 0;
+            }
             (*c).auto_vars_ator = zeroed();
+            scope_pop(&mut (*c).vars); // end function scope
         } else { // Variable definition
             (*l).parse_point = saved_point;
             declare_var(c, name, name_loc, Storage::External{name})?;
-
-            let mut global = Global {
-                name,
-                values: zeroed(),
-                is_vec: false,
-                minimum_size: 0,
-            };
-
-            // TODO: This code is ugly
-            // couldn't find a better way to write it while keeping accurate error messages
-            get_and_expect_tokens(l, &[Token::IntLit, Token::CharLit, Token::String, Token::ID, Token::SemiColon, Token::OBracket])?;
-
-            if (*l).token == Token::OBracket {
-                global.is_vec = true;
-                get_and_expect_tokens(l, &[Token::IntLit, Token::CBracket])?;
-                if (*l).token == Token::IntLit {
-                    global.minimum_size = (*l).int_number as usize;
-                    get_and_expect_token_but_continue(l, c, Token::CBracket)?;
-                }
-                get_and_expect_tokens(l, &[Token::IntLit, Token::CharLit, Token::String, Token::ID, Token::SemiColon])?;
-            }
-
-            while (*l).token != Token::SemiColon {
-                let value = match (*l).token {
-                    Token::IntLit | Token::CharLit => ImmediateValue::Literal((*l).int_number),
-                    Token::String => ImmediateValue::DataOffset(compile_string(l, c)),
-                    Token::ID => {
-                        let name = arena::strdup(&mut (*c).arena_names, (*l).string);
-                        let scope = da_last_mut(&mut (*c).vars).expect("There should be always at least the global scope");
-                        let var = find_var_near(scope, name);
-                        if var.is_null() {
-                            diagf!((*l).loc, c!("ERROR: could not find name `%s`\n"), name);
-                            bump_error_count(c)?;
-                        }
-                        ImmediateValue::Name(name)
-                    }
-                    _ => unreachable!()
+            if asm {
+                compile_asm_block_body(l, c)?;
+                let body = (*c).asm_block_body;
+                da_append(&mut (*c).asm_globals, AsmBlock {name, body});
+                (*c).asm_block_body = zeroed();
+            } else {
+                let mut global = Global {
+                    name,
+                    values: zeroed(),
+                    is_vec: false,
+                    minimum_size: 0,
                 };
-                da_append(&mut global.values, value);
 
-                get_and_expect_tokens(l, &[Token::SemiColon, Token::Comma])?;
-                if (*l).token == Token::Comma {
-                    get_and_expect_tokens(l, &[Token::IntLit, Token::CharLit, Token::String, Token::ID])?;
-                } else {
-                    break;
+                // TODO: This code is ugly
+                // couldn't find a better way to write it while keeping accurate error messages
+                get_and_expect_tokens(l, &[Token::IntLit, Token::CharLit, Token::String, Token::ID, Token::SemiColon, Token::OBracket])?;
+
+                if (*l).token == Token::OBracket {
+                    global.is_vec = true;
+                    get_and_expect_tokens(l, &[Token::IntLit, Token::CBracket])?;
+                    if (*l).token == Token::IntLit {
+                        global.minimum_size = (*l).int_number as usize;
+                        get_and_expect_token_but_continue(l, c, Token::CBracket)?;
+                    }
+                    get_and_expect_tokens(l, &[Token::IntLit, Token::CharLit, Token::String, Token::ID, Token::SemiColon])?;
                 }
-            }
 
-            if !global.is_vec && global.values.count == 0 {
-                da_append(&mut global.values, ImmediateValue::Literal(0));
-            }
-            da_append(&mut (*c).globals, global)
+                while (*l).token != Token::SemiColon {
+                    let value = match (*l).token {
+                        Token::IntLit | Token::CharLit => ImmediateValue::Literal((*l).int_number),
+                        Token::String => ImmediateValue::DataOffset(compile_string(l, c)),
+                        Token::ID => {
+                            let name = arena::strdup(&mut (*c).arena_names, (*l).string);
+                            let scope = da_last_mut(&mut (*c).vars).expect("There should be always at least the global scope");
+                            let var = find_var_near(scope, name);
+                            if var.is_null() {
+                                diagf!((*l).loc, c!("ERROR: could not find name `%s`\n"), name);
+                                bump_error_count(c)?;
+                            }
+                            ImmediateValue::Name(name)
+                        }
+                        _ => unreachable!()
+                    };
+                    da_append(&mut global.values, value);
 
+                    get_and_expect_tokens(l, &[Token::SemiColon, Token::Comma])?;
+                    if (*l).token == Token::Comma {
+                        get_and_expect_tokens(l, &[Token::IntLit, Token::CharLit, Token::String, Token::ID])?;
+                    } else {
+                        break;
+                    }
+                }
+
+                if !global.is_vec && global.values.count == 0 {
+                    da_append(&mut global.values, ImmediateValue::Literal(0));
+                }
+                da_append(&mut (*c).globals, global)
+            }
         }
     }
 
