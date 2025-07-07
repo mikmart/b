@@ -290,6 +290,7 @@ pub struct Lexer {
     pub token: Token,
     pub string: *const c_char,
     pub int_number: u64,
+    pub int_radix: Radix,
     pub loc: Loc,
 }
 
@@ -420,7 +421,7 @@ pub unsafe fn parse_string_into_storage(l: *mut Lexer, delim: c_char) -> Result 
 
 #[repr(u8)]
 #[derive(Clone, Copy)]
-enum Radix {
+pub enum Radix {
     Oct = 8,
     Dec = 10,
     Hex = 16,
@@ -448,7 +449,7 @@ unsafe fn parse_digit(c: c_char, radix: Radix) -> Option<u8> {
 }
 
 unsafe fn parse_number(l: *mut Lexer, radix: Radix) -> Result {
-    let mut result = Ok(());
+    let mut overflow = false;
     while let Some(x) = peek_char(l) {
         let Some(d) = parse_digit(x, radix) else {
             break;
@@ -456,35 +457,40 @@ unsafe fn parse_number(l: *mut Lexer, radix: Radix) -> Result {
         skip_char(l);
 
         let Some(r) = i64::checked_mul((*l).int_number as i64, radix as i64) else {
-            result = Err(ErrorKind::Error);
+            overflow = true;
             continue;
         };
         (*l).int_number = r as u64;
 
         let Some(r) = i64::checked_add((*l).int_number as i64, d as i64) else {
-            result = Err(ErrorKind::Error);
+            overflow = true;
             continue;
         };
         (*l).int_number = r as u64;
     }
-    if !result.is_ok() {
-        diagf!((*l).loc, c!("LEXER ERROR: Constant integer overflow\n"));
+    if (*l).historical && matches!(radix, Radix::Hex) {
+        diagf!((*l).loc, c!("LEXER ERROR: hex literals are not available in historical mode\n"));
+        return Err(ErrorKind::Error);
     }
-    result
+    if overflow {
+        diagf!((*l).loc, c!("LEXER ERROR: constant integer overflow\n"));
+        return Err(ErrorKind::Error);
+    }
+    Ok(())
 }
 
-pub unsafe fn get_token(l: *mut Lexer) -> Result {
+pub unsafe fn peek_token(l: *mut Lexer) -> Option<Token> {
+    let saved_point = (*l).parse_point;
+    let token = skip_token(l);
+    (*l).parse_point = saved_point;
+    token
+}
+
+pub unsafe fn skip_token(l: *mut Lexer) -> Option<Token> {
     'comments: loop {
         skip_whitespaces(l);
 
-        let saved_point = (*l).parse_point;
-        if skip_prefix(l, c!("//")) {
-            if (*l).historical {
-                (*l).parse_point = saved_point;
-                diagf!(loc(l), c!("LEXER ERROR: C++ style comments are not available in the historical mode.\n"));
-                // TODO: Convert to recoverable error. Need to advance lexer to not get stuck.
-                return Err(ErrorKind::Fatal);
-            }
+        if !(*l).historical && skip_prefix(l, c!("//")) {
             skip_until(l, c!("\n"));
             continue 'comments;
         }
@@ -500,21 +506,18 @@ pub unsafe fn get_token(l: *mut Lexer) -> Result {
     (*l).loc = loc(l);
 
     let Some(x) = peek_char(l) else {
-        (*l).token = Token::EOF;
-        return Ok(())
+        return Some(Token::EOF);
     };
-    let puncs = if !(*l).historical { PUNCTS } else { HISTORICAL_PUNCTS };
 
-    for i in 0..puncs.len() {
-        let (prefix, token) = (*puncs)[i];
+    let puncts = if !(*l).historical { PUNCTS } else { HISTORICAL_PUNCTS };
+    for i in 0..puncts.len() {
+        let (prefix, token) = (*puncts)[i];
         if skip_prefix(l, prefix) {
-            (*l).token = token;
-            return Ok(())
+            return Some(token);
         }
     }
 
     if is_identifier_start(x) {
-        (*l).token = Token::ID;
         (*l).string_storage.count = 0;
         while let Some(x) = peek_char(l) {
             if is_identifier(x) {
@@ -530,76 +533,139 @@ pub unsafe fn get_token(l: *mut Lexer) -> Result {
         for i in 0..KEYWORDS.len() {
             let (id, token) = (*KEYWORDS)[i];
             if strcmp((*l).string, id) == 0 {
-                (*l).token = token;
-                return Ok(());
+                return Some(token);
             }
         }
 
-        return Ok(())
+        return Some(Token::ID);
     }
 
     if skip_prefix(l, c!("0x")) {
-        (*l).token = Token::IntLit;
-        (*l).int_number = 0;
-        parse_number(l, Radix::Hex)?;
-        if (*l).historical {
-            diagf!((*l).loc, c!("LEXER ERROR: hex literals are not available in the historical mode.\n"));
-            return Err(ErrorKind::Error);
-        }
-        return Ok(());
+        (*l).int_radix = Radix::Hex;
+        return Some(Token::IntLit);
     }
-
+    
     if skip_prefix(l, c!("0")) {
-        (*l).token = Token::IntLit;
-        (*l).int_number = 0;
-        return parse_number(l, Radix::Oct);
+        (*l).int_radix = Radix::Oct;
+        return Some(Token::IntLit);
     }
-
+    
     if isdigit(x as c_int) != 0 {
-        (*l).token = Token::IntLit;
-        (*l).int_number = 0;
-        return parse_number(l, Radix::Dec);
+        (*l).int_radix = Radix::Dec;
+        return Some(Token::IntLit);
     }
 
     if x == '"' as c_char {
-        (*l).token = Token::String;
-        (*l).string_storage.count = 0;
-        parse_string_into_storage(l, '"' as c_char)?;
-        if is_eof(l) {
-            diagf!(loc(l), c!("LEXER ERROR: Unfinished string literal\n"));
-            diagf!((*l).loc, c!("LEXER INFO: Literal starts here\n"));
-            return Err(ErrorKind::Fatal);
-        }
-        da_append(&mut (*l).string_storage, 0);
-        (*l).string = (*l).string_storage.items;
-        return Ok(());
+        return Some(Token::String);
     }
 
     if x == '\'' as c_char {
-        (*l).token = Token::CharLit;
-        (*l).string_storage.count = 0;
-        parse_string_into_storage(l, '\'' as c_char)?;
-        if is_eof(l) {
-            diagf!(loc(l), c!("LEXER ERROR: Unfinished character literal\n"));
-            diagf!((*l).loc, c!("LEXER INFO: Literal starts here\n"));
-            return Err(ErrorKind::Fatal);
-        }
-        if (*l).string_storage.count == 0 {
-            diagf!((*l).loc, c!("LEXER ERROR: Empty character literal\n"));
-            return Err(ErrorKind::Error);
-        }
-        if (*l).string_storage.count > 2 {
-            diagf!((*l).loc, c!("LEXER ERROR: Character literal contains more than two characters\n"));
-            return Err(ErrorKind::Error);
-        }
-        (*l).int_number = 0;
-        for i in 0..(*l).string_storage.count {
-            (*l).int_number *= 0x100;
-            (*l).int_number += *(*l).string_storage.items.add(i) as u64;
-        }
-        return Ok(());
+        return Some(Token::CharLit);
     }
 
-    diagf!((*l).loc, c!("LEXER ERROR: Unknown token %c\n"), *(*l).parse_point.current as c_int);
-    Err(ErrorKind::Fatal)
+    None
+}
+
+pub unsafe fn get_token(l: *mut Lexer) -> Result {
+    let Some(token) = skip_token(l) else {
+        diagf!((*l).loc, c!("LEXER ERROR: Unknown token %c\n"), *(*l).parse_point.current as c_int);
+        return Err(ErrorKind::Fatal);
+    };
+    (*l).token = token;
+    match (*l).token {
+        // Terminal
+        Token::EOF => Ok(()),
+
+        // Puncts
+        Token::OCurly     |
+        Token::CCurly     |
+        Token::OParen     |
+        Token::CParen     |
+        Token::OBracket   |
+        Token::CBracket   |
+        Token::Not        |
+        Token::Mul        |
+        Token::Div        |
+        Token::Mod        |
+        Token::And        |
+        Token::Plus       |
+        Token::PlusPlus   |
+        Token::Minus      |
+        Token::MinusMinus |
+        Token::Less       |
+        Token::LessEq     |
+        Token::Greater    |
+        Token::GreaterEq  |
+        Token::Or         |
+        Token::Eq         |
+        Token::EqEq       |
+        Token::NotEq      |
+        Token::Shl        |
+        Token::ShlEq      |
+        Token::Shr        |
+        Token::ShrEq      |
+        Token::ModEq      |
+        Token::OrEq       |
+        Token::AndEq      |
+        Token::PlusEq     |
+        Token::MinusEq    |
+        Token::MulEq      |
+        Token::DivEq      |
+        Token::Question   |
+        Token::Colon      |
+        Token::SemiColon  |
+        Token::Comma      => Ok(()),
+
+        // Keywords
+        Token::Auto     |
+        Token::Extrn    |
+        Token::Case     |
+        Token::If       |
+        Token::Else     |
+        Token::While    |
+        Token::Switch   |
+        Token::Goto     |
+        Token::Return   |
+        Token::Asm      |
+        Token::Variadic => Ok(()),
+
+        // Values
+        Token::ID     => Ok(()),
+        Token::String => {
+            (*l).string_storage.count = 0;
+            parse_string_into_storage(l, '"' as c_char)?;
+            if is_eof(l) {
+                diagf!(loc(l), c!("LEXER ERROR: Unfinished string literal\n"));
+                diagf!((*l).loc, c!("LEXER INFO: Literal starts here\n"));
+                return Err(ErrorKind::Fatal);
+            }
+            da_append(&mut (*l).string_storage, 0);
+            (*l).string = (*l).string_storage.items;
+            Ok(())
+        },
+        Token::CharLit => {
+            (*l).string_storage.count = 0;
+            parse_string_into_storage(l, '\'' as c_char)?;
+            if is_eof(l) {
+                diagf!(loc(l), c!("LEXER ERROR: Unfinished character literal\n"));
+                diagf!((*l).loc, c!("LEXER INFO: Literal starts here\n"));
+                return Err(ErrorKind::Fatal);
+            }
+            if (*l).string_storage.count == 0 {
+                diagf!((*l).loc, c!("LEXER ERROR: Empty character literal\n"));
+                return Err(ErrorKind::Error);
+            }
+            if (*l).string_storage.count > 2 {
+                diagf!((*l).loc, c!("LEXER ERROR: Character literal contains more than two characters\n"));
+                return Err(ErrorKind::Error);
+            }
+            (*l).int_number = 0;
+            for i in 0..(*l).string_storage.count {
+                (*l).int_number *= 0x100;
+                (*l).int_number += *(*l).string_storage.items.add(i) as u64;
+            }
+            Ok(())
+        },
+        Token::IntLit => parse_number(l, (*l).int_radix),
+    }
 }
