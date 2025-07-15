@@ -121,14 +121,9 @@ pub struct Report {
     pub statuses: Array<ReportStatus>,
 }
 
-pub unsafe fn execute_test(
-    // Inputs
-    test_folder: *const c_char, name: *const c_char, target: Target,
-    // Outputs
-    cmd: *mut Cmd, sb: *mut String_Builder,
-) -> Option<Outcome> {
+pub unsafe fn execute_test(tester: *mut Tester, name: *const c_char, target: Target) -> Option<Outcome> {
     // TODO: add timeouts for running and building in case they go into infinite loop or something
-    let input_path = temp_sprintf(c!("%s/%s.b"), test_folder, name);
+    let input_path = temp_sprintf(c!("%s/%s.b"), (*tester).test_folder, name);
     let program_path = temp_sprintf(c!("%s/%s.%s"), GARBAGE_FOLDER, name, match target {
         Target::Gas_x86_64_Darwin   => c!("gas-x86_64-darwin"),
         Target::Gas_AArch64_Linux   => c!("gas-aarch64-linux"),
@@ -141,6 +136,7 @@ pub unsafe fn execute_test(
         Target::ILasm_Mono          => c!("exe"),
     });
     let stdout_path = temp_sprintf(c!("%s/%s.%s.stdout.txt"), GARBAGE_FOLDER, name, target.name());
+    let cmd = &mut (*tester).cmd;
     cmd_append! {
         cmd,
         c!("./build/b"),
@@ -158,12 +154,13 @@ pub unsafe fn execute_test(
         Target::Gas_x86_64_Windows  => runner::gas_x86_64_windows::run(cmd, program_path, &[], Some(stdout_path)),
         Target::Gas_x86_64_Darwin   => runner::gas_x86_64_darwin::run(cmd, program_path, &[], Some(stdout_path)),
         Target::Uxn                 => runner::uxn::run(cmd, c!("uxncli"), program_path, &[], Some(stdout_path)),
-        Target::Mos6502             => runner::mos6502::run(sb, Config {
+        Target::Mos6502             => runner::mos6502::run(&mut (*tester).sb, Config {
             load_offset: DEFAULT_LOAD_OFFSET
         }, program_path, Some(stdout_path)),
         Target::ILasm_Mono          => runner::ilasm_mono::run(cmd, program_path, &[], Some(stdout_path)),
     };
 
+    let sb = &mut (*tester).sb;
     (*sb).count = 0;
     read_entire_file(stdout_path, sb)?; // Should always succeed, but may fail if stdout_path is a directory for instance.
     da_append(sb, 0);                   // NULL-terminating the stdout
@@ -262,16 +259,11 @@ pub unsafe fn matches_glob(pattern: *const c_char, text: *const c_char) -> Optio
     }
 }
 
-pub unsafe fn record_tests(
-    // Inputs
-    test_folder: *const c_char, cases: *const [*const c_char], targets: *const [Target], tt: *mut TestTable,
-    // Outputs
-    cmd: *mut Cmd, sb: *mut String_Builder,
-    reports: *mut Array<Report>, stats_by_target: *mut Array<ReportStats>,
-) -> Option<()> {
+pub unsafe fn record_tests(tester: *mut Tester, tt: *mut TestTable) -> Option<()> {
     // TODO: Parallelize the test runner.
     // Probably using `cmd_run_async_and_reset`.
     // Also don't forget to add the `-j` flag.
+    let cases = (*tester).cases;
     for i in 0..cases.len() {
         let case_name = (*cases)[i];
         let mut report = Report {
@@ -279,17 +271,13 @@ pub unsafe fn record_tests(
             statuses: zeroed(),
         };
 
+        let targets = (*tester).targets;
         for j in 0..targets.len() {
             let target = (*targets)[j];
             if let Some(test_row) = test_table_find_row(tt, case_name, target) {
                 match (*test_row).state {
                     TestState::Enabled => {
-                        let outcome = execute_test(
-                            // Inputs
-                            test_folder, case_name, target,
-                            // Outputs
-                            cmd, sb,
-                        )?;
+                        let outcome = execute_test(tester, case_name, target)?;
                         match outcome {
                             Outcome::BuildFail => da_append(&mut report.statuses, ReportStatus::BuildFail),
                             Outcome::RunFail   => da_append(&mut report.statuses, ReportStatus::RunFail),
@@ -302,12 +290,7 @@ pub unsafe fn record_tests(
                     TestState::Disabled => da_append(&mut report.statuses, ReportStatus::Disabled),
                 }
             } else {
-                let outcome = execute_test(
-                    // Inputs
-                    test_folder, case_name, target,
-                    // Outputs
-                    cmd, sb,
-                )?;
+                let outcome = execute_test(tester, case_name, target)?;
                 match outcome {
                     Outcome::BuildFail => {
                         da_append(tt, TestRow {
@@ -342,11 +325,11 @@ pub unsafe fn record_tests(
                 }
             }
         }
-        da_append(reports, report);
+        da_append(&mut (*tester).reports, report);
     }
 
-    collect_stats_by_target(targets, da_slice(*reports), stats_by_target);
-    generate_report(da_slice(*reports), da_slice(*stats_by_target), targets);
+    collect_stats_by_target((*tester).targets, da_slice((*tester).reports), &mut (*tester).stats_by_target);
+    generate_report(da_slice((*tester).reports), da_slice((*tester).stats_by_target), (*tester).targets);
 
     Some(())
 }
@@ -571,17 +554,11 @@ pub unsafe fn save_tt_to_json_file(
     write_entire_file(json_path, (*jim).sink as *const c_void, (*jim).sink_count)
 }
 
-pub unsafe fn replay_tests(
-    // TODO: The Inputs and the Outputs want to be their own entity. But what should they be called?
-    // Inputs
-    test_folder: *const c_char, cases: *const [*const c_char], targets: *const [Target], mut tt: TestTable,
-    // Outputs
-    cmd: *mut Cmd, sb: *mut String_Builder, reports: *mut Array<Report>, stats_by_target: *mut Array<ReportStats>, jim: *mut Jim,
-) -> Option<()> {
-
+pub unsafe fn replay_tests(tester: *mut Tester, mut tt: TestTable, jim: *mut Jim) -> Option<()> {
     // TODO: Parallelize the test runner.
     // Probably using `cmd_run_async_and_reset`.
     // Also don't forget to add the `-j` flag.
+    let cases = (*tester).cases;
     for i in 0..cases.len() {
         let case_name = (*cases)[i];
         let mut report = Report {
@@ -589,17 +566,13 @@ pub unsafe fn replay_tests(
             statuses: zeroed(),
         };
 
+        let targets = (*tester).targets;
         for j in 0..targets.len() {
             let target = (*targets)[j];
             if let Some(row) = test_table_find_row(&mut tt, case_name, target) {
                 match (*row).state {
                     TestState::Enabled => {
-                        let outcome = execute_test(
-                            // Inputs
-                            test_folder, case_name, target,
-                            // Outputs
-                            cmd, sb,
-                        )?;
+                        let outcome = execute_test(tester, case_name, target)?;
                         match outcome {
                             Outcome::RunSuccess{stdout} =>
                                 if strcmp((*row).expected_stdout, stdout) != 0 {
@@ -621,13 +594,7 @@ pub unsafe fn replay_tests(
                     TestState::Disabled => da_append(&mut report.statuses, ReportStatus::Disabled),
                 }
             } else {
-                let outcome = execute_test(
-                    // Inputs
-                    test_folder, case_name, target,
-                    // Outputs
-                    cmd, sb,
-                )?;
-
+                let outcome = execute_test(tester, case_name, target)?;
                 match outcome {
                     Outcome::RunSuccess{..} => {
                         fprintf(stderr(), c!("UNEXPECTED OUTCOME!!! The outcome was never recorded. Please use -record flag to record what is expected for this test case at this target\n"));
@@ -638,11 +605,11 @@ pub unsafe fn replay_tests(
                 }
             }
         }
-        da_append(reports, report);
+        da_append(&mut (*tester).reports, report);
     }
 
-    collect_stats_by_target(targets, da_slice(*reports), stats_by_target);
-    generate_report(da_slice(*reports), da_slice(*stats_by_target), targets);
+    collect_stats_by_target((*tester).targets, da_slice((*tester).reports), &mut (*tester).stats_by_target);
+    generate_report(da_slice((*tester).reports), da_slice((*tester).stats_by_target), (*tester).targets);
 
     Some(())
 }
@@ -678,6 +645,37 @@ impl Action {
         }
         None
     }
+}
+
+pub unsafe fn load_test_cases_from_folder(folder_path: *const c_char, cases: *mut Array<*const c_char>) -> Option<()> {
+    let mut test_files: File_Paths = zeroed();
+    if !read_entire_dir(folder_path, &mut test_files) { return None; }
+    qsort(test_files.items as *mut c_void, test_files.count, size_of::<*const c_char>(), compar_cstr);
+
+    for i in 0..test_files.count {
+        let test_file = *test_files.items.add(i);
+        if *test_file == '.' as c_char { continue; }
+        let Some(case_name) = temp_strip_suffix(test_file, c!(".b")) else { continue; };
+        da_append(cases, case_name);
+    }
+
+    Some(())
+}
+
+#[derive(Clone, Copy)]
+pub struct Tester {
+    // Inputs
+    test_folder: *const c_char,
+    cases: *const [*const c_char],
+    targets: *const [Target],
+
+    // Outputs
+    reports: Array<Report>,
+    stats_by_target: Array<ReportStats>,
+
+    // Internals
+    cmd: Cmd,
+    sb: String_Builder,
 }
 
 pub unsafe fn main(argc: i32, argv: *mut*mut c_char) -> Option<()> {
@@ -749,14 +747,6 @@ pub unsafe fn main(argc: i32, argv: *mut*mut c_char) -> Option<()> {
         return Some(());
     }
 
-    let mut sb: String_Builder = zeroed();
-    let mut cmd: Cmd = zeroed();
-    let mut jim: Jim = zeroed();
-    jim.pp = 4;
-    let mut jimp: Jimp = zeroed();
-    let mut reports: Array<Report> = zeroed();
-    let mut stats_by_target: Array<ReportStats> = zeroed();
-
     let mut selected_targets: Array<Target> = zeroed();
     if (*target_flags).count == 0 {
         da_append_many(&mut selected_targets, TARGET_ORDER);
@@ -795,17 +785,7 @@ pub unsafe fn main(argc: i32, argv: *mut*mut c_char) -> Option<()> {
     }
 
     let mut all_cases: Array<*const c_char> = zeroed();
-
-    let mut test_files: File_Paths = zeroed();
-    if !read_entire_dir(*test_folder, &mut test_files) { return None; }
-    qsort(test_files.items as *mut c_void, test_files.count, size_of::<*const c_char>(), compar_cstr);
-
-    for i in 0..test_files.count {
-        let test_file = *test_files.items.add(i);
-        if *test_file == '.' as c_char { continue; }
-        let Some(case_name) = temp_strip_suffix(test_file, c!(".b")) else { continue; };
-        da_append(&mut all_cases, case_name);
-    }
+    load_test_cases_from_folder(*test_folder, &mut all_cases)?;
 
     let mut selected_cases: Array<*const c_char> = zeroed();
     if (*cases_flags).count == 0 {
@@ -869,28 +849,27 @@ pub unsafe fn main(argc: i32, argv: *mut*mut c_char) -> Option<()> {
         return None
     }
 
+    let mut tester: Tester = zeroed();
+    tester.test_folder = *test_folder;
+    tester.cases = da_slice(cases);
+    tester.targets = da_slice(targets);
+
+    let mut jimp: Jimp = zeroed();
+    let mut jim: Jim = zeroed();
+    jim.pp = 4;
+
     match action {
         Action::Record => {
-            let mut tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut sb, &mut jimp)?;
-            record_tests(
-                // Inputs
-                *test_folder, da_slice(cases), da_slice(targets), &mut tt,
-                // Outputs
-                &mut cmd, &mut sb, &mut reports, &mut stats_by_target,
-            )?;
+            let mut tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
+            record_tests(&mut tester, &mut tt)?;
             save_tt_to_json_file(json_path, tt, &mut jim)?;
         }
         Action::Replay => {
-            let tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut sb, &mut jimp)?;
-            replay_tests(
-                // Inputs
-                *test_folder, da_slice(cases), da_slice(targets), tt,
-                // Outputs
-                &mut cmd, &mut sb, &mut reports, &mut stats_by_target, &mut jim,
-            );
+            let tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
+            replay_tests(&mut tester, tt, &mut jim);
         }
         Action::Prune => {
-            let tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut sb, &mut jimp)?;
+            let tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
             save_tt_to_json_file(json_path, tt, &mut jim)?;
         }
         Action::Disable => {
@@ -906,7 +885,7 @@ pub unsafe fn main(argc: i32, argv: *mut*mut c_char) -> Option<()> {
                 target_width = cmp::max(target_width, strlen(target.name()));
             }
 
-            let mut tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut sb, &mut jimp)?;
+            let mut tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
             for i in 0..cases.count {
                 let case_name = *cases.items.add(i);
                 for j in 0..targets.count {
@@ -935,7 +914,7 @@ pub unsafe fn main(argc: i32, argv: *mut*mut c_char) -> Option<()> {
             save_tt_to_json_file(json_path, tt, &mut jim)?;
         }
         Action::Count => {
-            let tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut sb, &mut jimp)?;
+            let tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
             printf(c!("%zu\n"), tt.count);
         }
     }
