@@ -347,7 +347,9 @@ pub unsafe fn collect_stats_by_target(targets: *const [Target], reports: *const 
     stats_by_target
 }
 
-pub unsafe fn generate_report(reports: *const [Report], stats_by_target: *const [ReportStats], targets: *const [Target]) {
+pub unsafe fn generate_report(reports: *const [Report], targets: *const [Target]) {
+    let stats_by_target = collect_stats_by_target(targets, reports);
+
     let mut row_width = 0;
     for i in 0..reports.len() {
         let report = (*reports)[i];
@@ -363,7 +365,7 @@ pub unsafe fn generate_report(reports: *const [Report], stats_by_target: *const 
 
     print_legend(row_width);
     printf(c!("\n"));
-    print_top_labels(targets, stats_by_target, row_width, col_width);
+    print_top_labels(targets, da_slice(stats_by_target), row_width, col_width);
     for i in 0..reports.len() {
         let report = (*reports)[i];
         printf(c!("%*s:"), row_width, report.name);
@@ -373,7 +375,7 @@ pub unsafe fn generate_report(reports: *const [Report], stats_by_target: *const 
         }
         printf(c!("\n"));
     }
-    print_bottom_labels(targets, stats_by_target, row_width, col_width);
+    print_bottom_labels(targets, da_slice(stats_by_target), row_width, col_width);
     printf(c!("\n"));
     print_legend(row_width);
 }
@@ -861,15 +863,13 @@ pub unsafe fn main(argc: i32, argv: *mut*mut c_char) -> Option<()> {
         Action::Record => {
             let mut tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
             let reports = record_tests(&mut tester, &mut tt)?;
-            let stats_by_target = collect_stats_by_target(tester.targets, da_slice(reports));
-            generate_report(da_slice(reports), da_slice(stats_by_target), tester.targets);
+            generate_report(da_slice(reports), tester.targets);
             save_tt_to_json_file(json_path, tt, &mut jim)?;
         }
         Action::Replay => {
             let tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
             let reports = replay_tests(&mut tester, tt, &mut jim)?;
-            let stats_by_target = collect_stats_by_target(tester.targets, da_slice(reports));
-            generate_report(da_slice(reports), da_slice(stats_by_target), tester.targets);
+            generate_report(da_slice(reports), tester.targets);
         }
         Action::Prune => {
             let tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
