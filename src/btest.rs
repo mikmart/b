@@ -65,7 +65,7 @@ pub enum Outcome {
     /// The test built, but crashed at runtime
     RunFail,
     /// The test built, printed something and exited normally
-    RunSuccess{stdout: *const c_char},
+    RunSuccess,
 }
 
 enum_with_order! {
@@ -165,11 +165,12 @@ pub unsafe fn execute_test(tester: *mut Tester, name: *const c_char, target: Tar
     read_entire_file(stdout_path, sb)?; // Should always succeed, but may fail if stdout_path is a directory for instance.
     da_append(sb, 0);                   // NULL-terminating the stdout
     printf(c!("%s"), (*sb).items);      // Forward stdout for diagnostic purposes
+    (*tester).stdout = (*sb).items;
 
     if run_result.is_none() {
         Some(Outcome::RunFail)
     } else {
-        Some(Outcome::RunSuccess{stdout: strdup((*sb).items)}) // TODO: memory leak
+        Some(Outcome::RunSuccess)
     }
 }
 
@@ -279,10 +280,10 @@ pub unsafe fn record_tests(tester: *mut Tester, tt: *mut TestTable) -> Option<()
                     TestState::Enabled => {
                         let outcome = execute_test(tester, case_name, target)?;
                         match outcome {
-                            Outcome::BuildFail => da_append(&mut report.statuses, ReportStatus::BuildFail),
-                            Outcome::RunFail   => da_append(&mut report.statuses, ReportStatus::RunFail),
-                            Outcome::RunSuccess{stdout} => {
-                                (*test_row).expected_stdout = stdout;
+                            Outcome::BuildFail  => da_append(&mut report.statuses, ReportStatus::BuildFail),
+                            Outcome::RunFail    => da_append(&mut report.statuses, ReportStatus::RunFail),
+                            Outcome::RunSuccess => {
+                                (*test_row).expected_stdout = strdup((*tester).stdout); // TODO: memory leak
                                 da_append(&mut report.statuses, ReportStatus::OK);
                             }
                         }
@@ -312,7 +313,8 @@ pub unsafe fn record_tests(tester: *mut Tester, tt: *mut TestTable) -> Option<()
                         });
                         da_append(&mut report.statuses, ReportStatus::RunFail)
                     }
-                    Outcome::RunSuccess{stdout} => {
+                    Outcome::RunSuccess => {
+                        let stdout = strdup((*tester).stdout); // TODO: memory leak
                         da_append(tt, TestRow {
                             case_name,
                             target,
@@ -574,14 +576,14 @@ pub unsafe fn replay_tests(tester: *mut Tester, mut tt: TestTable, jim: *mut Jim
                     TestState::Enabled => {
                         let outcome = execute_test(tester, case_name, target)?;
                         match outcome {
-                            Outcome::RunSuccess{stdout} =>
-                                if strcmp((*row).expected_stdout, stdout) != 0 {
+                            Outcome::RunSuccess =>
+                                if strcmp((*row).expected_stdout, (*tester).stdout) != 0 {
                                     fprintf(stderr(), c!("UNEXPECTED OUTCOME!!!\n"));
                                     jim_begin(jim);
                                     jim_string(jim, (*row).expected_stdout);
                                     fprintf(stderr(), c!("EXPECTED: %.*s\n"), (*jim).sink_count, (*jim).sink);
                                     jim_begin(jim);
-                                    jim_string(jim, stdout);
+                                    jim_string(jim, (*tester).stdout);
                                     fprintf(stderr(), c!("ACTUAL:   %.*s\n"), (*jim).sink_count, (*jim).sink);
                                     da_append(&mut report.statuses, ReportStatus::StdoutMismatch);
                                 } else {
@@ -670,6 +672,7 @@ pub struct Tester {
     targets: *const [Target],
 
     // Outputs
+    stdout: *const c_char,
     reports: Array<Report>,
     stats_by_target: Array<ReportStats>,
 
