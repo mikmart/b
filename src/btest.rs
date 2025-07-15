@@ -380,6 +380,8 @@ pub unsafe fn generate_report(reports: *const [Report], targets: *const [Target]
     print_bottom_labels(targets, da_slice(stats_by_target), row_width, col_width);
     printf(c!("\n"));
     print_legend(row_width);
+
+    free(stats_by_target.items);
 }
 
 pub struct TestRow {
