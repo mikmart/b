@@ -15,6 +15,7 @@ pub mod glob;
 pub mod jim;
 pub mod jimp;
 pub mod lexer;
+pub mod arena;
 
 use core::ffi::*;
 use core::cmp;
@@ -28,6 +29,7 @@ use flag::*;
 use glob::*;
 use jim::*;
 use jimp::*;
+use arena::Arena;
 
 const GARBAGE_FOLDER: *const c_char = c!("./build/tests/");
 
@@ -284,7 +286,7 @@ pub unsafe fn record_tests(tester: *mut Tester, tt: *mut TestTable) -> Option<Ar
                             Outcome::BuildFail  => da_append(&mut report.statuses, ReportStatus::BuildFail),
                             Outcome::RunFail    => da_append(&mut report.statuses, ReportStatus::RunFail),
                             Outcome::RunSuccess => {
-                                (*test_row).expected_stdout = strdup((*tester).stdout); // TODO: memory leak
+                                (*test_row).expected_stdout = arena::strdup(&mut (*tester).arena, (*tester).stdout);
                                 da_append(&mut report.statuses, ReportStatus::OK);
                             }
                         }
@@ -315,7 +317,7 @@ pub unsafe fn record_tests(tester: *mut Tester, tt: *mut TestTable) -> Option<Ar
                         da_append(&mut report.statuses, ReportStatus::RunFail)
                     }
                     Outcome::RunSuccess => {
-                        let stdout = strdup((*tester).stdout); // TODO: memory leak
+                        let stdout = arena::strdup(&mut (*tester).arena, (*tester).stdout);
                         da_append(tt, TestRow {
                             case_name,
                             target,
@@ -406,10 +408,7 @@ pub unsafe fn test_table_find_row(tt: *mut TestTable, case_name: *const c_char, 
     None
 }
 
-pub unsafe fn load_tt_from_json_file_if_exists(
-    json_path: *const c_char, test_folder: *const c_char,
-    sb: *mut String_Builder, jimp: *mut Jimp
-) -> Option<TestTable> {
+pub unsafe fn load_tt_from_json_file_if_exists(tester: *mut Tester, json_path: *const c_char, jimp: *mut Jimp) -> Option<TestTable> {
     let mut tt: TestTable = zeroed();
     if file_exists(json_path)? {
         printf(c!("INFO: loading file %s...\n"), json_path);
@@ -417,13 +416,14 @@ pub unsafe fn load_tt_from_json_file_if_exists(
         // It would be much better if read_entire_file() returned the reason of failure so
         // it's easy to check if it failed due to ENOENT, but that requires significant
         // changes to nob.h rn.
-        (*sb).count = 0;
-        read_entire_file(json_path, sb)?;
+        (*tester).sb.count = 0;
+        read_entire_file(json_path, &mut (*tester).sb)?;
 
-        jimp_begin(jimp, json_path, (*sb).items, (*sb).count);
+        jimp_begin(jimp, json_path, (*tester).sb.items, (*tester).sb.count);
 
         jimp_array_begin(jimp)?;
         'table: while jimp_array_item(jimp) {
+            let mark = arena::snapshot(&mut (*tester).arena);
             let saved_point = (*jimp).point;
 
             let mut case_name: *const c_char = ptr::null();
@@ -436,7 +436,7 @@ pub unsafe fn load_tt_from_json_file_if_exists(
             'row: while jimp_object_member(jimp) {
                 if strcmp((*jimp).string, c!("case")) == 0 {
                     jimp_string(jimp)?;
-                    case_name = strdup((*jimp).string); // TODO: memory leak
+                    case_name = arena::strdup(&mut (*tester).arena, (*jimp).string);
                     continue 'row;
                 }
                 if strcmp((*jimp).string, c!("target")) == 0 {
@@ -454,7 +454,7 @@ pub unsafe fn load_tt_from_json_file_if_exists(
                 }
                 if strcmp((*jimp).string, c!("expected_stdout")) == 0 {
                     jimp_string(jimp)?;
-                    expected_stdout = strdup((*jimp).string); // TODO: memory leak
+                    expected_stdout = arena::strdup(&mut (*tester).arena, (*jimp).string);
                     continue 'row;
                 }
                 if strcmp((*jimp).string, c!("state")) == 0 {
@@ -472,7 +472,7 @@ pub unsafe fn load_tt_from_json_file_if_exists(
                 }
                 if strcmp((*jimp).string, c!("comment")) == 0 {
                     jimp_string(jimp)?;
-                    comment = strdup((*jimp).string); // TODO: memory leak
+                    comment = arena::strdup(&mut (*tester).arena, (*jimp).string);
                     continue 'row;
                 }
 
@@ -484,14 +484,14 @@ pub unsafe fn load_tt_from_json_file_if_exists(
             let Some(target) = target else {
                 (*jimp).token_start = saved_point;
                 jimp_diagf(jimp, c!("ERROR: `target` is not defined for this test row. Ignoring the entire row...\n"));
-                // TODO: memory leak, we are dropping the whole row here
+                arena::rewind(&mut (*tester).arena, mark);
                 continue 'table;
             };
 
             if case_name.is_null() {
                 (*jimp).token_start = saved_point;
                 jimp_diagf(jimp, c!("ERROR: `case_name` is not defined for this test row. Ignoring the entire row...\n"));
-                // TODO: memory leak, we are dropping the whole row here
+                arena::rewind(&mut (*tester).arena, mark);
                 continue 'table;
             }
 
@@ -501,15 +501,15 @@ pub unsafe fn load_tt_from_json_file_if_exists(
                 // This requires keeping track of location in TestRow structure. Which requires location tracking capabilities
                 // comparable to lexer.rs but in jim/jimp.
                 jimp_diagf(jimp, c!("WARNING: Redefinition of the row case `%s`, target `%s`. We are using only the first definition. All the rest are gonna be prunned"), case_name, target.name());
-                // TODO: memory leak, we are dropping the whole row here
+                arena::rewind(&mut (*tester).arena, mark);
                 continue 'table;
             }
 
-            let case_path = temp_sprintf(c!("%s/%s.b"), test_folder, case_name);
+            let case_path = temp_sprintf(c!("%s/%s.b"), (*tester).test_folder, case_name);
             if !file_exists(case_path)? {
                 (*jimp).token_start = saved_point;
                 jimp_diagf(jimp, c!("WARNING: %s does not exist. Ignoring case `%s`, target `%s` ...\n"), case_path, case_name, target.name());
-                // TODO: memory leak, we are dropping the whole row here
+                arena::rewind(&mut (*tester).arena, mark);
                 continue 'table;
             }
 
@@ -677,6 +677,7 @@ pub struct Tester {
     // Internals
     cmd: Cmd,
     sb: String_Builder,
+    arena: Arena,
 }
 
 pub unsafe fn main(argc: i32, argv: *mut*mut c_char) -> Option<()> {
@@ -861,18 +862,18 @@ pub unsafe fn main(argc: i32, argv: *mut*mut c_char) -> Option<()> {
 
     match action {
         Action::Record => {
-            let mut tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
+            let mut tt = load_tt_from_json_file_if_exists(&mut tester, json_path, &mut jimp)?;
             let reports = record_tests(&mut tester, &mut tt)?;
             generate_report(da_slice(reports), tester.targets);
             save_tt_to_json_file(json_path, tt, &mut jim)?;
         }
         Action::Replay => {
-            let tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
+            let tt = load_tt_from_json_file_if_exists(&mut tester, json_path, &mut jimp)?;
             let reports = replay_tests(&mut tester, tt, &mut jim)?;
             generate_report(da_slice(reports), tester.targets);
         }
         Action::Prune => {
-            let tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
+            let tt = load_tt_from_json_file_if_exists(&mut tester, json_path, &mut jimp)?;
             save_tt_to_json_file(json_path, tt, &mut jim)?;
         }
         Action::Disable => {
@@ -888,7 +889,7 @@ pub unsafe fn main(argc: i32, argv: *mut*mut c_char) -> Option<()> {
                 target_width = cmp::max(target_width, strlen(target.name()));
             }
 
-            let mut tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
+            let mut tt = load_tt_from_json_file_if_exists(&mut tester, json_path, &mut jimp)?;
             for i in 0..cases.count {
                 let case_name = *cases.items.add(i);
                 for j in 0..targets.count {
@@ -917,7 +918,7 @@ pub unsafe fn main(argc: i32, argv: *mut*mut c_char) -> Option<()> {
             save_tt_to_json_file(json_path, tt, &mut jim)?;
         }
         Action::Count => {
-            let tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
+            let tt = load_tt_from_json_file_if_exists(&mut tester, json_path, &mut jimp)?;
             printf(c!("%zu\n"), tt.count);
         }
     }
