@@ -260,7 +260,8 @@ pub unsafe fn matches_glob(pattern: *const c_char, text: *const c_char) -> Optio
     }
 }
 
-pub unsafe fn record_tests(tester: *mut Tester, tt: *mut TestTable) -> Option<()> {
+pub unsafe fn record_tests(tester: *mut Tester, tt: *mut TestTable) -> Option<Array<Report>> {
+    let mut reports: Array<Report> = zeroed();
     // TODO: Parallelize the test runner.
     // Probably using `cmd_run_async_and_reset`.
     // Also don't forget to add the `-j` flag.
@@ -327,24 +328,23 @@ pub unsafe fn record_tests(tester: *mut Tester, tt: *mut TestTable) -> Option<()
                 }
             }
         }
-        da_append(&mut (*tester).reports, report);
+        da_append(&mut reports, report);
     }
 
-    collect_stats_by_target((*tester).targets, da_slice((*tester).reports), &mut (*tester).stats_by_target);
-    generate_report(da_slice((*tester).reports), da_slice((*tester).stats_by_target), (*tester).targets);
-
-    Some(())
+    Some(reports)
 }
 
-pub unsafe fn collect_stats_by_target(targets: *const [Target], reports: *const [Report], stats_by_target: *mut Array<ReportStats>) {
+pub unsafe fn collect_stats_by_target(targets: *const [Target], reports: *const [Report]) -> Array<ReportStats> {
+    let mut stats_by_target = zeroed();
     for j in 0..targets.len() {
         let mut stats: ReportStats = zeroed();
         for i in 0..reports.len() {
             let report = (*reports)[i];
             stats.entries[*report.statuses.items.add(j) as usize] += 1;
         }
-        da_append(stats_by_target, stats);
+        da_append(&mut stats_by_target, stats);
     }
+    stats_by_target
 }
 
 pub unsafe fn generate_report(reports: *const [Report], stats_by_target: *const [ReportStats], targets: *const [Target]) {
@@ -556,7 +556,8 @@ pub unsafe fn save_tt_to_json_file(
     write_entire_file(json_path, (*jim).sink as *const c_void, (*jim).sink_count)
 }
 
-pub unsafe fn replay_tests(tester: *mut Tester, mut tt: TestTable, jim: *mut Jim) -> Option<()> {
+pub unsafe fn replay_tests(tester: *mut Tester, mut tt: TestTable, jim: *mut Jim) -> Option<Array<Report>> {
+    let mut reports: Array<Report> = zeroed();
     // TODO: Parallelize the test runner.
     // Probably using `cmd_run_async_and_reset`.
     // Also don't forget to add the `-j` flag.
@@ -607,13 +608,10 @@ pub unsafe fn replay_tests(tester: *mut Tester, mut tt: TestTable, jim: *mut Jim
                 }
             }
         }
-        da_append(&mut (*tester).reports, report);
+        da_append(&mut reports, report);
     }
 
-    collect_stats_by_target((*tester).targets, da_slice((*tester).reports), &mut (*tester).stats_by_target);
-    generate_report(da_slice((*tester).reports), da_slice((*tester).stats_by_target), (*tester).targets);
-
-    Some(())
+    Some(reports)
 }
 
 enum_with_order! {
@@ -673,8 +671,6 @@ pub struct Tester {
 
     // Outputs
     stdout: *const c_char,
-    reports: Array<Report>,
-    stats_by_target: Array<ReportStats>,
 
     // Internals
     cmd: Cmd,
@@ -864,12 +860,16 @@ pub unsafe fn main(argc: i32, argv: *mut*mut c_char) -> Option<()> {
     match action {
         Action::Record => {
             let mut tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
-            record_tests(&mut tester, &mut tt)?;
+            let reports = record_tests(&mut tester, &mut tt)?;
+            let stats_by_target = collect_stats_by_target(tester.targets, da_slice(reports));
+            generate_report(da_slice(reports), da_slice(stats_by_target), tester.targets);
             save_tt_to_json_file(json_path, tt, &mut jim)?;
         }
         Action::Replay => {
             let tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
-            replay_tests(&mut tester, tt, &mut jim);
+            let reports = replay_tests(&mut tester, tt, &mut jim)?;
+            let stats_by_target = collect_stats_by_target(tester.targets, da_slice(reports));
+            generate_report(da_slice(reports), da_slice(stats_by_target), tester.targets);
         }
         Action::Prune => {
             let tt = load_tt_from_json_file_if_exists(json_path, *test_folder, &mut tester.sb, &mut jimp)?;
