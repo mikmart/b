@@ -54,26 +54,13 @@ $ ./nob
 
 Copy the `build/posix6502` executable somewhere were the `$PATH` points at.
 
-### ilasm-mono
-
-See [https://github.com/bext-lang/dotnet-mono/](https://github.com/bext-lang/dotnet-mono/)
-
 ## Thirdparty Codegens in the Wild
 
+- [.NET/Mono Bext Codegen](https://github.com/bext-lang/dotnet-mono/)
 - [SH4AL-DSP (Casio Prizm/fx-CG50)](https://github.com/seija-amanojaku/sh4dsp_prizm)
 - [Custom Bext Bytecode](https://gitlab.com/nullnominal/bext-bytecode/)
 
 *Submit a PR to add yours to the list above here*
-
-## Contribution
-
-Accepting Pull Requests is currently paused. We are in the middle of [Decentralizing](https://github.com/tsoding/b/issues/62) this repo. The plan is
-
-1. ~~Create a separate organization for the language.~~
-2. ~~Keep `*x86_64*` and `*aarch64*` codegens in the main repo.~~
-3. Move codegens [6502](./src/codegen/mos6502.rs) (owner [@Miezekatze64](https://github.com/miezekatze64)), [uxn](./src/codegen/uxn.rs) (owner [@deniska](https://github.com/deniska)), [gas-sh4dsp-prizm](https://github.com/tsoding/b/pull/175) (owner [@seija-amanojaku](https://github.com/seija-amanojaku)) to separate repos within the organization and give the owners full admin access to them.
-
-You can still submit PRs in the meantime. Just don't expect them to be reviewed any time soon since decoupling codegens requires extensive refactoring. The PRs will be addressed eventually.
 
 ## References
 
