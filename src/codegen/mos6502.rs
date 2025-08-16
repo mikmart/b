@@ -1545,7 +1545,7 @@ pub unsafe fn generate_asm_funcs(out: *mut String_Builder, asm_funcs: *const [As
 }
 
 pub unsafe fn usage(params: *const [Param]) {
-    fprintf(stderr(), c!("mos6402 codegen for the B compiler\n"));
+    fprintf(stderr(), c!("mos6502 codegen for the B compiler\n"));
     fprintf(stderr(), c!("OPTIONS:\n"));
     print_params_help(params);
 }
