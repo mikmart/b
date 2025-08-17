@@ -20,22 +20,22 @@ const char *thirdparty_objects[] = {
 // TODO: Support MacOS and Android.
 typedef enum {
     TARGET_POSIX,
-    TARGET_MINGW32,
+    TARGET_MINGW,
     TARGET_MSVC,
 } Build_Target;
 
 #if defined(_WIN32) && defined(_MSC_VER)
     Build_Target default_target = TARGET_MSVC;
 #elif defined(_WIN32)
-    Build_Target default_target = TARGET_MINGW32;
+    Build_Target default_target = TARGET_MINGW;
 #else
     Build_Target default_target = TARGET_POSIX;
 #endif
 
 typedef struct {
-    size_t max_procs;
     Cmd cmd;
     Procs procs;
+    size_t max_procs;
     String_Builder sb;
 } Build_Context;
 
@@ -50,89 +50,70 @@ bool run_cmd(Build_Context *build) {
 }
 
 bool build_thirdparty_objects(Build_Context *build, Build_Target target, File_Paths *object_paths) {
-    const char *cc;
-    switch (target) {
-        case TARGET_POSIX:   cc = getenv("CC");             break;
-        case TARGET_MINGW32: cc = "x86_64-w64-mingw32-gcc"; break;
-        case TARGET_MSVC:    cc = "cl";                     break;
-    }
-    if (!cc) cc = "cc";
-
-    const char *object_ext;
-    switch (target) {
-        case TARGET_POSIX:
-        case TARGET_MINGW32: object_ext = ".o";   break;
-        case TARGET_MSVC:    object_ext = ".obj"; break;
-    }
-
     for (int i = 0; i < ARRAY_LEN(thirdparty_objects); i++) {
         const char *object_name = thirdparty_objects[i];
-        const char *output_path = temp_sprintf(BUILD_FOLDER"%s%s", object_name, object_ext);
         const char *input_path = temp_sprintf("./thirdparty/%s.c", object_name);
         switch (target) {
             case TARGET_POSIX:
-            case TARGET_MINGW32: {
+            case TARGET_MINGW: {
+                const char *cc = (target == TARGET_MINGW) ? "x86_64-w64-mingw32-gcc" : getenv("CC");
+                const char *output_path = temp_sprintf(BUILD_FOLDER"%s.o", object_name);
                 cmd_append(
                     &build->cmd,
-                    cc,
+                    cc ? cc : "cc",
                     "-fPIC",
                     "-g",
                     "-c", input_path,
                     "-o", output_path,
                 );
                 cmd_append(&build->cmd, "-lc", "-lgcc");
+                da_append(object_paths, output_path);
             } break;
 
             case TARGET_MSVC: {
+                const char *obj_path = temp_sprintf(BUILD_FOLDER"%s.obj", object_name);
+                const char *pdb_path = temp_sprintf(BUILD_FOLDER"%s.pdb", object_name);
                 cmd_append(
                     &build->cmd,
-                    cc,
+                    "cl",
                     "/nologo",
                     "/Zi",
                     "/MD",
                     "/c", input_path,
-                    temp_sprintf("/Fo:%s", output_path),
-                    temp_sprintf("/Fd:%s%s.pdb", BUILD_FOLDER, object_name),
+                    temp_sprintf("/Fo:%s", obj_path),
+                    temp_sprintf("/Fd:%s", pdb_path),
                 );
+                da_append(object_paths, obj_path);
             } break;
         }
-        da_append(object_paths, output_path);
         if (!run_cmd(build)) return false;
     }
     return true;
 }
 
-bool build_crust_executable(Build_Context *build, Build_Target target, File_Paths object_paths, const char *program_name, const char **executable_path) {
-    const char *executable_ext;
+const char *get_executable_ext(Build_Target target) {
     switch (target) {
-        case TARGET_POSIX:   executable_ext = "";     break;
-        case TARGET_MINGW32:
-        case TARGET_MSVC:    executable_ext = ".exe"; break;
+        case TARGET_POSIX: return "";
+        case TARGET_MINGW:
+        case TARGET_MSVC:  return ".exe";
     }
+}
 
+bool build_crust_executable(Build_Context *build, Build_Target target, File_Paths object_paths, const char *program_name, const char **executable_path) {
     const char *input_path  = temp_sprintf(SRC_FOLDER"%s.rs", program_name);
-    const char *output_path = temp_sprintf(BUILD_FOLDER"%s%s", program_name, executable_ext);
+    const char *output_path = temp_sprintf(BUILD_FOLDER"%s%s", program_name, get_executable_ext(target));
 
     if (executable_path) {
         *executable_path = output_path;
     }
 
-    // This is pretty weird, but since we need linker arguments in a space-separated string to pass to rustc,
-    // it's actually quite convenient to use the Cmd to collect the arguments and render that to the string.
     da_append_many(&build->cmd, object_paths.items, object_paths.count);
     switch (target) {
-        case TARGET_POSIX: {
-            cmd_append(&build->cmd, "-lc", "-lgcc");
-        } break;
-        case TARGET_MINGW32: {
-            cmd_append(&build->cmd, "-lmingwex", "-lmsvcrt", "-lkernel32");
-        } break;
-        case TARGET_MSVC: {
-            cmd_append(&build->cmd, "msvcrt.lib", "legacy_stdio_definitions.lib");
-        } break;
+        case TARGET_POSIX: cmd_append(&build->cmd, "-lc", "-lgcc"); break;
+        case TARGET_MINGW: cmd_append(&build->cmd, "-lmingwex", "-lmsvcrt", "-lkernel32"); break;
+        case TARGET_MSVC:  cmd_append(&build->cmd, "msvcrt.lib", "legacy_stdio_definitions.lib"); break;
     }
 
-    // Must not add quotes here because Cmd will quote this entire argument when rendered.
     build->sb.count = 0;
     sb_append_cstr(&build->sb, "link-args=");
     cmd_render(build->cmd, &build->sb);
@@ -153,12 +134,19 @@ bool build_crust_executable(Build_Context *build, Build_Target target, File_Path
     );
 
     switch (target) {
-        case TARGET_POSIX:   break;
-        case TARGET_MINGW32: cmd_append(&build->cmd, "--target", "x86_64-pc-windows-gnu");  break;
-        case TARGET_MSVC:    cmd_append(&build->cmd, "--target", "x86_64-pc-windows-msvc"); break;
+        case TARGET_POSIX: break;
+        case TARGET_MINGW: cmd_append(&build->cmd, "--target", "x86_64-pc-windows-gnu");  break;
+        case TARGET_MSVC:  cmd_append(&build->cmd, "--target", "x86_64-pc-windows-msvc"); break;
     }
 
     return run_cmd(build);
+}
+
+bool target_from_cstr(const char *target_name, Build_Target *target) {
+    if (strcmp(target_name, "posix") == 0) { *target = TARGET_POSIX; return true; }
+    if (strcmp(target_name, "mingw") == 0) { *target = TARGET_MINGW; return true; }
+    if (strcmp(target_name, "msvc") == 0)  { *target = TARGET_MSVC;  return true; }
+    return false;
 }
 
 int main(int argc, char **argv) {
@@ -167,8 +155,37 @@ int main(int argc, char **argv) {
     Build_Context build = {0};
     Build_Target target = default_target;
 
-    // TODO: Accept target as a command line argument.
-    // TODO: Accept max_procs as a command line argument.
+    // TODO: Add usage() and help flag.
+    const char *program_name = shift(argv, argc);
+    while (argc) {
+        const char *arg = shift(argv, argc);
+        if (strcmp(arg, "-j") == 0) {
+            if (!argc) {
+                nob_log(ERROR, "%s: bad -j: no value provided", program_name);
+                return 1;
+            }
+            const char *max_procs = shift(argv, argc);
+            const char *endptr;
+            build.max_procs = strtoul(max_procs, &endptr, 0);
+            if (strcmp(endptr, "") != 0) {
+                nob_log(ERROR, "%s: bad -j: expected an integer, got \"%s\"", program_name, max_procs);
+                return 1;
+            }
+        } else if (strcmp(arg, "-t") == 0) {
+            if (!argc) {
+                nob_log(ERROR, "%s: bad -t: no value provided", program_name);
+                return 1;
+            }
+            const char *target_name = shift(argv, argc);
+            if (!target_from_cstr(target_name, &target)) {
+                nob_log(ERROR, "%s: bad -t: no such target: \"%s\"", program_name, target_name);
+                return 1;
+            }
+        } else {
+            nob_log(ERROR, "%s: unexpected command line argument: \"%s\"", program_name, arg);
+            return 1;
+        }
+    }
 
     if (!mkdir_if_not_exists(BUILD_FOLDER)) return 1;
 
