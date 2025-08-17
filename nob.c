@@ -164,8 +164,8 @@ int main(int argc, char **argv) {
                 nob_log(ERROR, "%s: bad -j: no value provided", program_name);
                 return 1;
             }
-            const char *max_procs = shift(argv, argc);
-            const char *endptr;
+            char *max_procs = shift(argv, argc);
+            char *endptr;
             build.max_procs = strtoul(max_procs, &endptr, 0);
             if (strcmp(endptr, "") != 0) {
                 nob_log(ERROR, "%s: bad -j: expected an integer, got \"%s\"", program_name, max_procs);
