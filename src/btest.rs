@@ -13,6 +13,7 @@ pub mod flag;
 pub mod glob;
 pub mod jim;
 pub mod jimp;
+pub mod time;
 
 pub mod ir;
 pub mod arena;

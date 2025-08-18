@@ -131,6 +131,8 @@ enum_with_order! {
 }
 
 extern "C" {
+    #[link_name = "nob_path_name"]
+    pub fn path_name(path: *const c_char) -> *const c_char;
     #[link_name = "nob_temp_sprintf"]
     pub fn temp_sprintf(format: *const c_char, ...) -> *mut c_char;
     #[link_name = "nob_temp_strdup"]

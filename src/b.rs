@@ -1170,6 +1170,15 @@ pub unsafe fn temp_strip_file_ext(path: *const c_char) -> *const c_char {
     }
 }
 
+pub unsafe fn temp_path_dir(path: *const c_char) -> *const c_char {
+    let name = path_name(path);
+    if name != path {
+        temp_sprintf(c!("%.*s"), name.offset_from(path), path)
+    } else {
+        c!(".")
+    }
+}
+
 pub unsafe fn get_garbage_base(path: *const c_char, target: Target) -> Option<*mut c_char> {
     const GARBAGE_PATH_NAME: *const c_char = c!(".build");
 
@@ -1289,7 +1298,7 @@ pub unsafe fn main(mut argc: i32, mut argv: *mut*mut c_char) -> Option<()> {
 
     let mut c: Compiler = zeroed();
     c.historical = *historical;
-    let executable_directory = arena::strdup(&mut c.arena, dirname(flag_program_name()));
+    let executable_directory = temp_path_dir(flag_program_name());
 
     if (*linker).count > 0 {
         let mut s: Shlex = zeroed();
